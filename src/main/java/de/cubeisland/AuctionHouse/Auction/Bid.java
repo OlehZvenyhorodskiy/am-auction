@@ -51,9 +51,15 @@ public class Bid implements DatabaseEntity
                 new Timestamp(System.currentTimeMillis())
             );
             ResultSet set = db.query("SELECT * FROM `bids` WHERE `timestamp`=? && `bidderid`=? LIMIT 1",timestamp,bidder.getId());
-            if (set.next())
-                this.id = set.getInt("id");
-                
+            try
+            {
+                if (set.next())
+                    this.id = set.getInt("id");
+            }
+            finally
+            {
+                try { set.close(); } catch (Throwable ignored) {}
+            }
         }
         catch (SQLException ex)
         {}

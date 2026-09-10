@@ -76,13 +76,19 @@ public class AuctionItem implements DatabaseEntity
                   this.item.getAmount(),this.price,new Timestamp(this.date),auction.getOwnerId());
             ResultSet set =
                     db.query("SELECT * FROM `auctionbox` ORDER BY `id` DESC LIMIT 1");
-             if (set.next())
-                this.id = set.getInt("id");
-                
+            try
+            {
+                if (set.next())
+                    this.id = set.getInt("id");
+            }
+            finally
+            {
+                try { set.close(); } catch (Throwable ignored) {}
+            }
         }
         catch (SQLException ex)
         {
-            
+
         }
     }
 
@@ -117,7 +123,7 @@ public class AuctionItem implements DatabaseEntity
         {
             db.exec(
                     "INSERT INTO `auctionbox` ("+
-                    "`playerid` ,"+
+                    "`bidderid` ,"+
                     "`item` ,"+
                     "`amount` ,"+
                     "`price` ,"+
@@ -129,12 +135,19 @@ public class AuctionItem implements DatabaseEntity
                   item.getAmount(),this.price,this.date,bidder.getId());
             ResultSet set =
                     db.query("SELECT * FROM `auctionbox` ORDER BY `id` DESC LIMIT 1");
-            if (set.next())
-                this.id = set.getInt("id");
+            try
+            {
+                if (set.next())
+                    this.id = set.getInt("id");
+            }
+            finally
+            {
+                try { set.close(); } catch (Throwable ignored) {}
+            }
         }
         catch (SQLException ex)
         {
-            
+
         }
     }
     

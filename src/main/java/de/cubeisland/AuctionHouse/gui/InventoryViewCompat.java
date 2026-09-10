@@ -13,9 +13,15 @@ import org.bukkit.inventory.Inventory;
  * compiled with the wrong descriptor crashes with NoSuchMethodError before the
  * menu can open. Reflection resolves the method by name/parameters at runtime
  * and ignores the return value, so both variants work.
+ *
+ * The resolved Method is cached: menus open frequently (every /ah, every click
+ * navigation) and looking it up via getMethod on each open wasted CPU and kept
+ * reflection metadata busy for no reason.
  */
 final class InventoryViewCompat
 {
+    private static volatile Method openInventoryMethod;
+
     private InventoryViewCompat()
     {
     }
@@ -26,24 +32,29 @@ final class InventoryViewCompat
         {
             return false;
         }
-        try
-        {
-            Method method = ((Object)player).getClass().getMethod("openInventory", Inventory.class);
-            method.invoke(player, inventory);
-            return true;
-        }
-        catch (Throwable first)
+        Method method = openInventoryMethod;
+        if (method == null)
         {
             try
             {
-                Method method = Player.class.getMethod("openInventory", Inventory.class);
-                method.invoke(player, inventory);
-                return true;
+                // Resolve through the interface so the found Method works for every
+                // implementation class (CraftPlayer and any mock/test implementations).
+                method = Player.class.getMethod("openInventory", Inventory.class);
+                openInventoryMethod = method;
             }
             catch (Throwable ignored)
             {
                 return false;
             }
+        }
+        try
+        {
+            method.invoke(player, inventory);
+            return true;
+        }
+        catch (Throwable ignored)
+        {
+            return false;
         }
     }
 }

@@ -1,5 +1,5 @@
 name: AuctionHousAqua
-version: "1.21.8-1.4.6-inventoryviewfix154"
+version: "1.21.8-1.4.7-perffix155"
 main: de.cubeisland.AuctionHouse.AuctionHouse
 api-version: '1.21'
 commands:

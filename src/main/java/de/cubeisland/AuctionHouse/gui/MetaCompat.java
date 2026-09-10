@@ -1,5 +1,6 @@
 package de.cubeisland.AuctionHouse.gui;
 
+import java.lang.reflect.Method;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 
@@ -11,9 +12,14 @@ import org.bukkit.inventory.meta.ItemMeta;
  * (ItemMeta)Z. A direct call can therefore throw NoSuchMethodError when a GUI
  * tries to open the details/claim menu. Reflection ignores the return type and
  * safely calls the method that is present on the running server.
+ *
+ * The resolved Method is cached: every menu item build calls this shim, so the
+ * per-call getMethod lookup was pure overhead.
  */
 final class MetaCompat
 {
+    private static volatile Method setItemMetaMethod;
+
     private MetaCompat()
     {
     }
@@ -24,9 +30,22 @@ final class MetaCompat
         {
             return false;
         }
+        Method method = setItemMetaMethod;
+        if (method == null)
+        {
+            try
+            {
+                method = ItemStack.class.getMethod("setItemMeta", ItemMeta.class);
+                setItemMetaMethod = method;
+            }
+            catch (Throwable ignored)
+            {
+                return false;
+            }
+        }
         try
         {
-            Object result = ItemStack.class.getMethod("setItemMeta", ItemMeta.class).invoke(stack, meta);
+            Object result = method.invoke(stack, meta);
             return !(result instanceof Boolean) || ((Boolean)result).booleanValue();
         }
         catch (Throwable ignored)

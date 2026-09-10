@@ -2,7 +2,8 @@ debug: false
 logging:
   # pluginActivity: false hides routine AuctionHousAqua INFO messages in console. Errors are still printed.
   pluginActivity: false
-  # debug: true enables detailed diagnostic messages. Keep false on production.
+  # debug: true enables detailed diagnostic messages ("Start loading database...", per-sync logs etc).
+  # WARNING: keep false on production! Together with a low syncIntervalSeconds it produced 110k+ log lines per day.
   debug: false
 auction:
   maxAuctions:
@@ -45,20 +46,29 @@ auction:
     autoCreateDatabase: true
     connectTimeoutMs: 10000
     socketTimeoutMs: 30000
-    # MySQL polling fallback. Keep 0 when Redis is enabled; Redis events will sync servers instantly without full DB reloads.
-    # Use 30-120 only as a backup if Redis is disabled/unavailable.
+    # Full-MySQL polling fallback. Recommended values:
+    #   0          - polling disabled (use this when redis.enabled is true and Redis is reachable)
+    #   30-120     - fallback for single servers or when Redis is disabled/unavailable.
+    # Values below 30 are automatically raised to 30: a full table reload every few seconds
+    # caused tick freezes and 110k+ lines of debug spam per day. Full reloads now run on an
+    # async thread and are applied on the main thread, but they still cost MySQL load.
+    # Redis events, when enabled, sync servers instantly without any full reloads.
     syncIntervalSeconds: 0
 
 redis:
+  # Redis pub/sub gives instant cross-server sync without full MySQL reloads.
+  # Set to false only for a single standalone server (then consider syncIntervalSeconds: 30-120).
   enabled: true
   channel:
     prefix: "auctionhouse:"
     main: "auctionhouse:messaging"
     inventory: "auctionhouse:inventories"
     transaction: "auctionhouse:transactions"
-  host: "45.93.200.125"
+  # SECURITY: never commit real credentials to a repository. If a real password/host ever
+  # was committed, rotate it immediately (change the Redis password and the requirepass config).
+  host: "127.0.0.1"
   port: 6379
-  password: "iINi$OCMEY"
+  password: "change-me"
   database: 0
   # Regular command timeout. Subscriber uses an infinite read timeout, so idle Redis does not reconnect every few seconds.
   timeoutMs: 2000

@@ -198,9 +198,14 @@ public class AuctionHouse extends JavaPlugin
     public void onDisable()
     {
         CrossServerSync.getInstance().stop();
+        // Cancel pending sync/apply tasks first so nothing touches the database while it closes.
+        this.getServer().getScheduler().cancelTasks(this);
         if (this.database != null)
         {
-            this.database.close();
+            // Bounded close: runs the blocking Connection#close on a daemon thread and
+            // aborts the connection after 3s. This is what used to freeze the Server thread
+            // for 40+ seconds on /plugman unload (Paper Watchdog dumps at Database.java:346).
+            this.database.close(3000L);
         }
         this.database = null;
         this.economy = null;

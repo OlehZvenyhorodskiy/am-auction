@@ -13,11 +13,13 @@ import java.sql.*;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import org.bukkit.inventory.ItemStack;
 
 /**
@@ -25,6 +27,9 @@ import org.bukkit.inventory.ItemStack;
  */
 public class Database
 {
+    /** After a failed connect attempt, fail fast for a while instead of stalling callers with connect timeouts. */
+    private static final long CONNECT_BREAKER_MS = 15000L;
+
     private final String host;
     private final int port;
     private final String user;
@@ -32,7 +37,7 @@ public class Database
     private final String configuredName;
     private final boolean allowAutoPrefixedNames;
     private final List<String> databaseNameCandidates;
-    private String activeName;
+    private volatile String activeName;
     private final String jdbcUrl;
     private final String extraParameters;
     private final boolean autoCreateDatabase;
@@ -40,6 +45,22 @@ public class Database
     private final int socketTimeoutMs;
 
     private Connection connection;
+
+    /**
+     * Timestamp of the last successful write executed through this Database.
+     * Snapshots fetched asynchronously are discarded when a local write happened while
+     * they were being fetched, so a full reload can never resurrect rows that were
+     * just sold or removed on this server.
+     */
+    private volatile long lastWriteAt = 0L;
+
+    /**
+     * When set to a future timestamp, ensureConnection() fails fast without trying to
+     * reconnect. A single failed connect attempt costs several connectTimeoutMs (one per
+     * database-name candidate); repeating that on the Server thread for every menu click
+     * was one of the reported freeze causes while MySQL was unreachable.
+     */
+    private volatile long connectBreakerUntil = 0L;
 
     public Database(String user, String pass, String name)
     {
@@ -182,7 +203,27 @@ public class Database
     private synchronized void connect()
     {
         closeSilently();
+        try
+        {
+            this.connection = openConnection();
+            this.connectBreakerUntil = 0L;
+        }
+        catch (RuntimeException ex)
+        {
+            this.connectBreakerUntil = System.currentTimeMillis() + CONNECT_BREAKER_MS;
+            throw ex;
+        }
+    }
 
+    /**
+     * Opens a brand new MySQL connection without touching {@link #connection}.
+     * Tries the configured jdbcUrl first, then every database-name candidate
+     * (optionally auto-creating the schema). Used by {@link #connect()} and by
+     * the async snapshot fetch which runs on its own connection so it can never
+     * block or be blocked by the main-thread connection.
+     */
+    private Connection openConnection()
+    {
         SQLException firstFailure = null;
         List<String> attemptedUrls = new ArrayList<String>();
 
@@ -192,10 +233,7 @@ public class Database
             attemptedUrls.add(maskCredentials(finalUrl));
             try
             {
-                this.connection = DriverManager.getConnection(finalUrl, this.user, this.pass);
-                this.activeName = this.configuredName;
-                configureConnection(this.connection);
-                return;
+                return finishConnection(DriverManager.getConnection(finalUrl, this.user, this.pass), this.configuredName);
             }
             catch (SQLException e)
             {
@@ -210,10 +248,7 @@ public class Database
                 attemptedUrls.add(maskCredentials(databaseUrl));
                 try
                 {
-                    this.connection = DriverManager.getConnection(databaseUrl, this.user, this.pass);
-                    this.activeName = candidateName;
-                    configureConnection(this.connection);
-                    return;
+                    return finishConnection(DriverManager.getConnection(databaseUrl, this.user, this.pass), candidateName);
                 }
                 catch (SQLException e)
                 {
@@ -228,10 +263,7 @@ public class Database
                     tryCreateDatabase(candidateName, attemptedUrls);
                     try
                     {
-                        this.connection = DriverManager.getConnection(databaseUrl, this.user, this.pass);
-                        this.activeName = candidateName;
-                        configureConnection(this.connection);
-                        return;
+                        return finishConnection(DriverManager.getConnection(databaseUrl, this.user, this.pass), candidateName);
                     }
                     catch (SQLException e)
                     {
@@ -258,6 +290,20 @@ public class Database
             message.append(" using ").append(attemptedUrls);
         }
         throw new IllegalStateException(message.toString(), firstFailure);
+    }
+
+    private Connection finishConnection(Connection connection, String name) throws SQLException
+    {
+        connection.setAutoCommit(true);
+        try
+        {
+            connection.setCatalog(name);
+        }
+        catch (SQLException ignored)
+        {
+        }
+        this.activeName = name;
+        return connection;
     }
 
     private void tryCreateDatabase(String databaseName, List<String> attemptedUrls)
@@ -305,20 +351,12 @@ public class Database
         return url.replace(this.pass, "****");
     }
 
-    private void configureConnection(Connection connection) throws SQLException
-    {
-        connection.setAutoCommit(true);
-        try
-        {
-            connection.setCatalog(this.activeName);
-        }
-        catch (SQLException ignored)
-        {
-        }
-    }
-
     private synchronized void ensureConnection()
     {
+        if (System.currentTimeMillis() < this.connectBreakerUntil)
+        {
+            throw new IllegalStateException("MySQL connection failed recently; skipping reconnect attempt (circuit breaker).");
+        }
         try
         {
             if (this.connection == null || this.connection.isClosed() || !this.connection.isValid(2))
@@ -334,7 +372,69 @@ public class Database
 
     public void close()
     {
-        closeSilently();
+        close(3000L);
+    }
+
+    /**
+     * Closes the shared connection without freezing the calling (usually main) thread.
+     *
+     * The blocking {@link Connection#close()} runs on a short-lived daemon thread and is
+     * only waited for up to timeoutMs milliseconds. When it does not finish in time
+     * (e.g. the MySQL socket is stuck, as seen in the Paper Watchdog dumps at
+     * Database.java closeSilently), the connection is aborted forcefully, which closes
+     * the underlying socket immediately.
+     */
+    public void close(long timeoutMs)
+    {
+        final Connection toClose;
+        synchronized (this)
+        {
+            toClose = this.connection;
+            this.connection = null;
+        }
+        if (toClose == null)
+        {
+            return;
+        }
+        Thread closer = new Thread(new Runnable()
+        {
+            @Override
+            public void run()
+            {
+                try
+                {
+                    toClose.close();
+                }
+                catch (SQLException ignored)
+                {
+                }
+            }
+        }, "AuctionHousAqua-DB-Close");
+        closer.setDaemon(true);
+        closer.start();
+        try
+        {
+            closer.join(Math.max(500L, timeoutMs));
+        }
+        catch (InterruptedException e)
+        {
+            Thread.currentThread().interrupt();
+        }
+        if (closer.isAlive())
+        {
+            AuctionHouse plugin = AuctionHouse.getInstance();
+            if (plugin != null)
+            {
+                plugin.getLogger().warning("Database close did not finish in time; aborting the MySQL connection forcefully.");
+            }
+            try
+            {
+                toClose.abort(Runnable::run);
+            }
+            catch (SQLException | RuntimeException ignored)
+            {
+            }
+        }
     }
 
     private synchronized void closeSilently()
@@ -359,12 +459,42 @@ public class Database
     {
         ensureConnection();
         PreparedStatement statement = this.connection.prepareStatement(query);
+        // Statement leak fix: callers close the ResultSet (often via try-with-resources)
+        // but never the Statement. closeOnCompletion() makes the driver close the
+        // Statement as soon as its ResultSet is closed, so statements can no longer pile
+        // up on the connection (the pile-up was what froze Connection#close for 40+ seconds).
+        statement.closeOnCompletion();
         for (int i = 0; i < params.length; ++i)
         {
             statement.setObject(i + 1, params[i]);
         }
         return statement;
     }
+
+    private void closeStatement(PreparedStatement statement)
+    {
+        if (statement != null)
+        {
+            try
+            {
+                statement.close();
+            }
+            catch (SQLException ignored)
+            {
+            }
+        }
+    }
+
+    private void markWrite()
+    {
+        this.lastWriteAt = System.currentTimeMillis();
+    }
+
+    public long getLastWriteAt()
+    {
+        return this.lastWriteAt;
+    }
+
 
     private void setupStructure()
     {
@@ -463,21 +593,25 @@ public class Database
 
     public ResultSet query(String query, Object... params)
     {
+        PreparedStatement statement = null;
         try
         {
-            return createStatement(query, params).executeQuery();
+            statement = createStatement(query, params);
+            return statement.executeQuery();
         }
         catch (SQLException e)
         {
+            closeStatement(statement);
             throw new IllegalStateException("Failed to execute query: " + query, e);
         }
     }
 
     public int execUpdate(String query, Object... params)
     {
-        try
+        try (PreparedStatement statement = createStatement(query, params))
         {
-            return createStatement(query, params).executeUpdate();
+            this.markWrite();
+            return statement.executeUpdate();
         }
         catch (SQLException e)
         {
@@ -487,9 +621,10 @@ public class Database
 
     public boolean exec(String query, Object... params)
     {
-        try
+        try (PreparedStatement statement = createStatement(query, params))
         {
-            return createStatement(query, params).execute();
+            this.markWrite();
+            return statement.execute();
         }
         catch (SQLException e)
         {
@@ -497,107 +632,347 @@ public class Database
         }
     }
 
+    /**
+     * Legacy synchronous full reload on the calling thread (used once during onEnable).
+     * Periodic and GUI-triggered reloads must use {@link #fetchSnapshot()} on an async
+     * thread plus {@link #applySnapshot(DatabaseSnapshot, long)} on the main thread instead.
+     */
     public synchronized void loadDatabase()
     {
-        AuctionHouse.debug("Start loading database...");
-
+        long startedAt = System.currentTimeMillis();
         try
         {
-            Manager.getInstance().clearForDatabaseReload();
-            Bidder.getInstances().clear();
-            ServerBidder.resetInstance();
-
-            Map<Integer, String> bidderNames = loadBiddersIntoMemory();
-            AuctionHouse.debug("All bidders loaded!");
-
-            try (ResultSet auctions = this.query("SELECT * FROM `auctions` ORDER BY `id` ASC"))
-            {
-                while (auctions.next())
-                {
-                    int id = auctions.getInt("id");
-                    int ownerId = auctions.getInt("ownerid");
-                    ItemStack item = Util.convertItem(auctions.getString("item"), auctions.getInt("amount"));
-                    Bidder owner = Bidder.getInstance(ownerId, bidderName(bidderNames, ownerId));
-                    long auctionEnd = auctions.getTimestamp("timestamp").getTime();
-                    Auction auction = new Auction(id, item, owner, auctionEnd);
-                    Manager.getInstance().addAuction(auction);
-
-                    try (ResultSet bidset = this.query("SELECT * FROM `bids` WHERE `auctionid` = ? ORDER BY `timestamp` ASC", id))
-                    {
-                        while (bidset.next())
-                        {
-                            int bidderId = bidset.getInt("bidderid");
-                            Bid bid = new Bid(
-                                bidset.getInt("id"),
-                                bidderId,
-                                bidderName(bidderNames, bidderId),
-                                bidset.getDouble("amount"),
-                                bidset.getTimestamp("timestamp")
-                            );
-                            Auction loaded = Manager.getInstance().getAuction(auction.getId());
-                            if (loaded != null)
-                            {
-                                loaded.getBids().push(bid);
-                            }
-                        }
-                    }
-                }
-            }
-            AuctionHouse.debug("All auctions loaded!");
-
-            try (ResultSet subset = this.query("SELECT * FROM `subscription`"))
-            {
-                while (subset.next())
-                {
-                    int bidderId = subset.getInt("bidderid");
-                    Bidder bidder = Bidder.getInstance(bidderId, bidderName(bidderNames, bidderId));
-                    if (subset.getInt("type") == 1)
-                    {
-                        bidder.addDataBaseSub(subset.getInt("auctionid"));
-                    }
-                    else
-                    {
-                        bidder.addDataBaseSub(Util.convertItem(subset.getString("item")));
-                    }
-                }
-            }
-            AuctionHouse.debug("All subscriptions loaded!");
-
-            try (ResultSet itemset = this.query("SELECT * FROM `auctionbox` ORDER BY `timestamp` ASC"))
-            {
-                while (itemset.next())
-                {
-                    int bidderId = itemset.getInt("bidderid");
-                    int ownerId = itemset.getInt("ownerid");
-                    Bidder bidder = Bidder.getInstance(bidderId, bidderName(bidderNames, bidderId));
-                    bidder.getBox().getItemList().add(
-                        new AuctionItem(
-                            bidder,
-                            Util.convertItem(itemset.getString("item"), itemset.getInt("amount")),
-                            itemset.getTimestamp("timestamp"),
-                            bidderName(bidderNames, ownerId),
-                            itemset.getDouble("price"),
-                            itemset.getInt("id")
-                        )
-                    );
-                }
-            }
-            AuctionHouse.debug("All auctionboxes loaded!");
-
-            try (ResultSet priceset = this.query("SELECT * FROM `price`"))
-            {
-                while (priceset.next())
-                {
-                    Manager.getInstance().setPrice(Util.convertItem(priceset.getString("item")), priceset.getDouble("price"), priceset.getInt("amount"));
-                }
-            }
-            AuctionHouse.debug("All average prices loaded!");
-            AuctionHouse.log("Database loaded successfully");
+            this.ensureConnection();
+            this.applySnapshot(this.fetchSnapshot(this.connection, startedAt), startedAt);
         }
         catch (SQLException ex)
         {
             throw new IllegalStateException("Error while loading the database!", ex);
         }
+    }
+
+    /**
+     * Fetches a full snapshot of all auction tables on a dedicated short-lived connection.
+     * This method performs JDBC I/O only and never touches the Bukkit API, so it is safe
+     * to call from an async thread while the main thread keeps using the shared connection.
+     *
+     * @throws IllegalStateException when the database cannot be reached or read
+     */
+    public DatabaseSnapshot fetchSnapshot()
+    {
+        long startedAt = System.currentTimeMillis();
+        Connection connection = openSnapshotConnection();
+        try
+        {
+            return this.fetchSnapshot(connection, startedAt);
+        }
+        catch (SQLException ex)
+        {
+            throw new IllegalStateException("Error while fetching a database snapshot!", ex);
+        }
+        finally
+        {
+            try
+            {
+                connection.close();
+            }
+            catch (SQLException ignored)
+            {
+            }
+        }
+    }
+
+    private Connection openSnapshotConnection()
+    {
+        if (this.jdbcUrl.isEmpty() && this.activeName != null)
+        {
+            String url = this.buildDatabaseUrl(this.activeName);
+            try
+            {
+                return this.finishConnection(DriverManager.getConnection(url, this.user, this.pass), this.activeName);
+            }
+            catch (SQLException ignored)
+            {
+                // Fall through and retry with the full candidate list below.
+            }
+        }
+        return this.openConnection();
+    }
+
+    private DatabaseSnapshot fetchSnapshot(Connection connection, long startedAt) throws SQLException
+    {
+        AuctionHouse.debug("Start loading database...");
+
+        List<DatabaseSnapshot.BidderRow> bidders = new ArrayList<DatabaseSnapshot.BidderRow>();
+        Map<Integer, String> bidderNames = new HashMap<Integer, String>();
+        try (PreparedStatement statement = connection.prepareStatement("SELECT * FROM `bidder`");
+             ResultSet bidderset = statement.executeQuery())
+        {
+            while (bidderset.next())
+            {
+                int id = bidderset.getInt("id");
+                String name = bidderset.getString("name");
+                bidderNames.put(Integer.valueOf(id), name);
+                bidders.add(new DatabaseSnapshot.BidderRow(id, name, bidderset.getByte("notify")));
+            }
+        }
+
+        List<DatabaseSnapshot.AuctionRow> auctions = new ArrayList<DatabaseSnapshot.AuctionRow>();
+        Map<Integer, DatabaseSnapshot.AuctionRow> auctionRowsById = new HashMap<Integer, DatabaseSnapshot.AuctionRow>();
+        try (PreparedStatement statement = connection.prepareStatement("SELECT * FROM `auctions` ORDER BY `id` ASC");
+             ResultSet auctionset = statement.executeQuery())
+        {
+            while (auctionset.next())
+            {
+                int id = auctionset.getInt("id");
+                DatabaseSnapshot.AuctionRow row = new DatabaseSnapshot.AuctionRow(
+                    id,
+                    auctionset.getInt("ownerid"),
+                    auctionset.getString("item"),
+                    auctionset.getInt("amount"),
+                    auctionset.getTimestamp("timestamp").getTime()
+                );
+                auctions.add(row);
+                auctionRowsById.put(Integer.valueOf(id), row);
+            }
+        }
+
+        // Bid history is loaded with one query instead of one query per auction (old N+1 pattern).
+        try (PreparedStatement statement = connection.prepareStatement("SELECT * FROM `bids` ORDER BY `auctionid` ASC, `timestamp` ASC, `id` ASC");
+             ResultSet bidset = statement.executeQuery())
+        {
+            while (bidset.next())
+            {
+                DatabaseSnapshot.AuctionRow auctionRow = auctionRowsById.get(Integer.valueOf(bidset.getInt("auctionid")));
+                if (auctionRow == null)
+                {
+                    continue; // bid without an auction cannot exist while the FKs are in place
+                }
+                auctionRow.bids.add(new DatabaseSnapshot.BidRow(
+                    bidset.getInt("id"),
+                    bidset.getInt("bidderid"),
+                    bidset.getDouble("amount"),
+                    bidset.getTimestamp("timestamp")
+                ));
+            }
+        }
+
+        List<DatabaseSnapshot.SubscriptionRow> subscriptions = new ArrayList<DatabaseSnapshot.SubscriptionRow>();
+        try (PreparedStatement statement = connection.prepareStatement("SELECT * FROM `subscription`");
+             ResultSet subset = statement.executeQuery())
+        {
+            while (subset.next())
+            {
+                subscriptions.add(new DatabaseSnapshot.SubscriptionRow(
+                    subset.getInt("bidderid"),
+                    subset.getInt("auctionid"),
+                    subset.getInt("type"),
+                    subset.getString("item")
+                ));
+            }
+        }
+
+        List<DatabaseSnapshot.BoxRow> boxes = new ArrayList<DatabaseSnapshot.BoxRow>();
+        try (PreparedStatement statement = connection.prepareStatement("SELECT * FROM `auctionbox` ORDER BY `timestamp` ASC");
+             ResultSet itemset = statement.executeQuery())
+        {
+            while (itemset.next())
+            {
+                boxes.add(new DatabaseSnapshot.BoxRow(
+                    itemset.getInt("id"),
+                    itemset.getInt("bidderid"),
+                    itemset.getString("item"),
+                    itemset.getInt("amount"),
+                    itemset.getDouble("price"),
+                    itemset.getTimestamp("timestamp"),
+                    itemset.getInt("ownerid")
+                ));
+            }
+        }
+
+        List<DatabaseSnapshot.PriceRow> prices = new ArrayList<DatabaseSnapshot.PriceRow>();
+        try (PreparedStatement statement = connection.prepareStatement("SELECT * FROM `price`");
+             ResultSet priceset = statement.executeQuery())
+        {
+            while (priceset.next())
+            {
+                prices.add(new DatabaseSnapshot.PriceRow(
+                    priceset.getString("item"),
+                    priceset.getDouble("price"),
+                    priceset.getInt("amount")
+                ));
+            }
+        }
+
+        // Resolve bidder names that are referenced by rows but missing from the bidder table
+        // (possible on shared hosting where the FK creation failed). This used to run as single
+        // row SELECTs in the middle of the apply step; doing it here keeps the apply step JDBC-free.
+        this.resolveMissingBidderNames(connection, bidderNames, auctions, boxes, subscriptions);
+
+        return new DatabaseSnapshot(startedAt, bidders, auctions, subscriptions, boxes, prices, bidderNames);
+    }
+
+    private void resolveMissingBidderNames(Connection connection, Map<Integer, String> bidderNames,
+                                           List<DatabaseSnapshot.AuctionRow> auctions,
+                                           List<DatabaseSnapshot.BoxRow> boxes,
+                                           List<DatabaseSnapshot.SubscriptionRow> subscriptions) throws SQLException
+    {
+        Set<Integer> referenced = new HashSet<Integer>();
+        for (DatabaseSnapshot.AuctionRow auctionRow : auctions)
+        {
+            referenced.add(Integer.valueOf(auctionRow.ownerId));
+            for (DatabaseSnapshot.BidRow bidRow : auctionRow.bids)
+            {
+                referenced.add(Integer.valueOf(bidRow.bidderId));
+            }
+        }
+        for (DatabaseSnapshot.SubscriptionRow subscriptionRow : subscriptions)
+        {
+            referenced.add(Integer.valueOf(subscriptionRow.bidderId));
+        }
+        for (DatabaseSnapshot.BoxRow boxRow : boxes)
+        {
+            referenced.add(Integer.valueOf(boxRow.bidderId));
+            referenced.add(Integer.valueOf(boxRow.ownerId));
+        }
+        for (Integer id : referenced)
+        {
+            if (!bidderNames.containsKey(id))
+            {
+                String name = this.lookupBidderName(connection, id.intValue());
+                if (name != null)
+                {
+                    bidderNames.put(id, name);
+                }
+            }
+        }
+    }
+
+    private String lookupBidderName(Connection connection, int id) throws SQLException
+    {
+        try (PreparedStatement statement = connection.prepareStatement("SELECT `name` FROM `bidder` WHERE `id`=? LIMIT 1"))
+        {
+            statement.setInt(1, id);
+            try (ResultSet set = statement.executeQuery())
+            {
+                if (set.next())
+                {
+                    return set.getString("name");
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Rebuilds the in-memory caches (Manager auctions, Bidders, boxes, subscriptions, prices)
+     * from a snapshot previously returned by {@link #fetchSnapshot()}.
+     *
+     * This method creates Bukkit objects (ItemStack deserialization, OfflinePlayer lookups)
+     * and must therefore run on the main server thread. It performs no JDBC calls.
+     *
+     * @return false when the snapshot was stale (a local write happened while it was fetched)
+     *         and was discarded without touching the caches.
+     */
+    public boolean applySnapshot(DatabaseSnapshot snapshot, long fetchedAt)
+    {
+        if (snapshot == null)
+        {
+            return false;
+        }
+        if (fetchedAt > 0L && fetchedAt < this.lastWriteAt)
+        {
+            AuctionHouse.debug("Skipped a stale database snapshot: this server wrote to MySQL while it was being fetched.");
+            return false;
+        }
+
+        Manager.getInstance().clearForDatabaseReload();
+        Bidder.getInstances().clear();
+        ServerBidder.resetInstance();
+
+        Map<Integer, String> bidderNames = snapshot.bidderNames;
+        for (DatabaseSnapshot.BidderRow bidderRow : snapshot.bidders)
+        {
+            Bidder bidder = Bidder.getInstance(bidderRow.id, bidderRow.name);
+            bidder.resetNotifyState(bidderRow.notify);
+        }
+        AuctionHouse.debug("All bidders loaded!");
+
+        for (DatabaseSnapshot.AuctionRow auctionRow : snapshot.auctions)
+        {
+            String ownerName = bidderNames.get(Integer.valueOf(auctionRow.ownerId));
+            if (ownerName == null)
+            {
+                AuctionHouse.debug("Skipped auction #" + auctionRow.id + ": unknown bidder id " + auctionRow.ownerId + ".");
+                continue;
+            }
+            ItemStack item = Util.convertItem(auctionRow.item, auctionRow.amount);
+            Bidder owner = Bidder.getInstance(auctionRow.ownerId, ownerName);
+            Auction auction = new Auction(auctionRow.id, item, owner, auctionRow.auctionEnd);
+            for (DatabaseSnapshot.BidRow bidRow : auctionRow.bids)
+            {
+                String bidderName = bidderNames.get(Integer.valueOf(bidRow.bidderId));
+                if (bidderName == null)
+                {
+                    AuctionHouse.debug("Skipped bid #" + bidRow.id + ": unknown bidder id " + bidRow.bidderId + ".");
+                    continue;
+                }
+                auction.getBids().push(new Bid(bidRow.id, bidRow.bidderId, bidderName, bidRow.amount, bidRow.timestamp));
+            }
+            Manager.getInstance().addAuction(auction);
+        }
+        AuctionHouse.debug("All auctions loaded!");
+
+        for (DatabaseSnapshot.SubscriptionRow subscriptionRow : snapshot.subscriptions)
+        {
+            String bidderName = bidderNames.get(Integer.valueOf(subscriptionRow.bidderId));
+            if (bidderName == null)
+            {
+                AuctionHouse.debug("Skipped subscription: unknown bidder id " + subscriptionRow.bidderId + ".");
+                continue;
+            }
+            Bidder bidder = Bidder.getInstance(subscriptionRow.bidderId, bidderName);
+            if (subscriptionRow.type == 1)
+            {
+                bidder.addDataBaseSub(subscriptionRow.auctionId);
+            }
+            else
+            {
+                bidder.addDataBaseSub(Util.convertItem(subscriptionRow.item));
+            }
+        }
+        AuctionHouse.debug("All subscriptions loaded!");
+
+        for (DatabaseSnapshot.BoxRow boxRow : snapshot.boxes)
+        {
+            String bidderName = bidderNames.get(Integer.valueOf(boxRow.bidderId));
+            if (bidderName == null)
+            {
+                AuctionHouse.debug("Skipped auctionbox item #" + boxRow.id + ": unknown bidder id " + boxRow.bidderId + ".");
+                continue;
+            }
+            Bidder bidder = Bidder.getInstance(boxRow.bidderId, bidderName);
+            String ownerName = bidderNames.get(Integer.valueOf(boxRow.ownerId));
+            bidder.getBox().getItemList().add(
+                new AuctionItem(
+                    bidder,
+                    Util.convertItem(boxRow.item, boxRow.amount),
+                    boxRow.timestamp,
+                    ownerName,
+                    boxRow.price,
+                    boxRow.id
+                )
+            );
+        }
+        AuctionHouse.debug("All auctionboxes loaded!");
+
+        for (DatabaseSnapshot.PriceRow priceRow : snapshot.prices)
+        {
+            Manager.getInstance().setPrice(Util.convertItem(priceRow.item), priceRow.price, priceRow.amount);
+        }
+        AuctionHouse.debug("All average prices loaded!");
+        AuctionHouse.log("Database loaded successfully");
+        return true;
     }
 
     public synchronized boolean loadAuctionById(int auctionId)
@@ -705,23 +1080,6 @@ public class Database
         {
             throw new IllegalStateException("Error while checking auction #" + auctionId + " existence!", ex);
         }
-    }
-
-    private Map<Integer, String> loadBiddersIntoMemory() throws SQLException
-    {
-        Map<Integer, String> bidderNames = new HashMap<Integer, String>();
-        try (ResultSet bidderset = this.query("SELECT * FROM `bidder`"))
-        {
-            while (bidderset.next())
-            {
-                int id = bidderset.getInt("id");
-                String name = bidderset.getString("name");
-                bidderNames.put(id, name);
-                Bidder bidder = Bidder.getInstance(id, name);
-                bidder.resetNotifyState(bidderset.getByte("notify"));
-            }
-        }
-        return bidderNames;
     }
 
     private Map<Integer, String> loadBidderNameMap() throws SQLException
@@ -857,7 +1215,11 @@ public class Database
             query.append(limit);
         }
 
-        return this.createStatement(query.toString(), params.toArray()).executeUpdate();
+        try (PreparedStatement statement = this.createStatement(query.toString(), params.toArray()))
+        {
+            this.markWrite();
+            return statement.executeUpdate();
+        }
     }
 
     public int insert(DatabaseEntity entity) throws SQLException
@@ -904,7 +1266,11 @@ public class Database
         }
         query.append(")").append(vals);
 
-        return this.createStatement(query.toString(), params.toArray()).executeUpdate();
+        try (PreparedStatement statement = this.createStatement(query.toString(), params.toArray()))
+        {
+            this.markWrite();
+            return statement.executeUpdate();
+        }
     }
 
     public int delete(String[] tables, Condition condition) throws SQLException
@@ -933,7 +1299,11 @@ public class Database
             }
             query.append(limit);
         }
-        return this.createStatement(query.toString(), condition == null ? new Object[0] : condition.getValues()).executeUpdate();
+        try (PreparedStatement statement = this.createStatement(query.toString(), condition == null ? new Object[0] : condition.getValues()))
+        {
+            this.markWrite();
+            return statement.executeUpdate();
+        }
     }
 
     public ResultSet select(String[] fields, String[] tables) throws SQLException
@@ -969,7 +1339,17 @@ public class Database
             query.append(limit);
         }
 
-        return this.createStatement(query.toString(), condition == null ? new Object[0] : condition.getValues()).executeQuery();
+        PreparedStatement statement = null;
+        try
+        {
+            statement = this.createStatement(query.toString(), condition == null ? new Object[0] : condition.getValues());
+            return statement.executeQuery();
+        }
+        catch (SQLException e)
+        {
+            closeStatement(statement);
+            throw e;
+        }
     }
 
     private String generateFieldList(String[] fields)

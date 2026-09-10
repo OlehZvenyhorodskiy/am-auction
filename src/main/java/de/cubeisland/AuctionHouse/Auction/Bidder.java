@@ -89,9 +89,16 @@ public class Bidder implements DatabaseEntity
             }
             ResultSet set =
                 db.query("SELECT * FROM `bidder` WHERE `name`=? LIMIT 1", name);
-            if (set.next())
+            try
             {
-                this.id = set.getInt("id");
+                if (set.next())
+                {
+                    this.id = set.getInt("id");
+                }
+            }
+            finally
+            {
+                try { set.close(); } catch (Throwable ignored) {}
             }
         }
         catch (SQLException ex)

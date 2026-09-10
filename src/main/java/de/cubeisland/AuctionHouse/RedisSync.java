@@ -28,6 +28,9 @@ import org.bukkit.Bukkit;
 public class RedisSync
 {
     private static final String VERSION = "AHAQ1";
+    /** After a connection failure, skip Redis commands for a while instead of stalling callers (up to several seconds each). */
+    private static final long COMMAND_BREAKER_MS = 15000L;
+
     private static RedisSync instance;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -40,6 +43,8 @@ public class RedisSync
     private volatile long lastMessageAt = 0L;
     private volatile long lastPublishAt = 0L;
     private volatile String lastError = "";
+    /** When set to a future timestamp, execute() fails fast without opening a socket. */
+    private volatile long commandBreakerUntil = 0L;
 
     public static RedisSync getInstance()
     {
@@ -155,7 +160,19 @@ public class RedisSync
             return true;
         }
         String token = this.serverId + ":" + reason + ":" + System.nanoTime();
-        Object result = execute("SET", lockKey(auctionId), token, "NX", "PX", String.valueOf(Math.max(1000, config.redis_lockTtlMs)));
+        Object result;
+        try
+        {
+            result = execute("SET", lockKey(auctionId), token, "NX", "PX", String.valueOf(Math.max(1000, config.redis_lockTtlMs)));
+        }
+        catch (RuntimeException ex)
+        {
+            // Redis unreachable: degrade to single-server mode instead of failing (and previously
+            // stalling the Server thread) on every buy. The circuit breaker in execute() keeps
+            // further attempts cheap for a while.
+            AuctionHouse.debug("Redis lock unavailable, continuing without a distributed lock: " + ex.getMessage());
+            return true;
+        }
         if ("OK".equalsIgnoreCase(String.valueOf(result)))
         {
             this.localAuctionLocks.put(auctionId, token);
@@ -413,6 +430,12 @@ public class RedisSync
 
     private Object execute(String... args)
     {
+        // Circuit breaker: after a recent connection failure, fail fast instead of making the
+        // caller (often the Server thread during a buy) wait for connect/read timeouts again.
+        if (System.currentTimeMillis() < this.commandBreakerUntil)
+        {
+            throw new IllegalStateException("Redis skipped: connection failed recently (circuit breaker open)");
+        }
         boolean acquired = false;
         try
         {
@@ -447,6 +470,7 @@ public class RedisSync
         catch (IOException e)
         {
             this.lastError = e.getMessage();
+            this.commandBreakerUntil = System.currentTimeMillis() + COMMAND_BREAKER_MS;
             throw new IllegalStateException("Redis command failed", e);
         }
         finally

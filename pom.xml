@@ -5,7 +5,7 @@
 
     <groupId>de.cubeisland</groupId>
     <artifactId>auctionhousaqua</artifactId>
-    <version>1.21.8-1.4.6-inventoryviewfix154</version>
+    <version>1.21.8-1.4.7-perffix155</version>
     <name>AuctionHousAqua</name>
     <packaging>jar</packaging>
     <description>Offline-ready auction house plugin for Minecraft 1.21.8</description>
