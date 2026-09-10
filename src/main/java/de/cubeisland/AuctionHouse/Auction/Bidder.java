@@ -131,6 +131,10 @@ public class Bidder implements DatabaseEntity
  */    
     public static Bidder getInstance(int id, String player)
     {
+        if (player == null)
+        {
+            return null;
+        }
         Bidder instance;
         if (player.equalsIgnoreCase("*Server"))
         {
@@ -439,7 +443,7 @@ public class Bidder implements DatabaseEntity
  */  
     public boolean removeAuction(Auction auction)
     {
-        db.execUpdate("DELETE FROM `bids` WHERE `bidderid`=? && `auctionid`=?", this.id, auction.getId());
+        db.execUpdate("DELETE FROM `bids` WHERE `bidderid`=? AND `auctionid`=?", this.id, auction.getId());
         this.removeSubscription(auction);
         return activeBids.remove(auction);
     }
@@ -450,7 +454,7 @@ public class Bidder implements DatabaseEntity
  */  
     public boolean removeSubscription(Auction auction)
     {
-        db.execUpdate("DELETE FROM `subscription` WHERE `bidderid`=? && `auctionid`=?", this.id, auction.getId());
+        db.execUpdate("DELETE FROM `subscription` WHERE `bidderid`=? AND `auctionid`=?", this.id, auction.getId());
         return subscriptions.remove(auction);
     }
 
@@ -461,7 +465,7 @@ public class Bidder implements DatabaseEntity
     public boolean removeSubscription(ItemStack item)
     {
         //MAtSub delete
-        db.execUpdate("DELETE FROM `subscription` WHERE `bidderid`=? && `item`=?", this.id, Util.convertItem(item));
+        db.execUpdate("DELETE FROM `subscription` WHERE `bidderid`=? AND `item`=?", this.id, Util.convertItem(item));
         return materialSub.remove(item);
     }
 

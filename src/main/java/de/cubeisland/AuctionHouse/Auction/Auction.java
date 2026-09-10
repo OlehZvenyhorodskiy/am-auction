@@ -138,7 +138,7 @@ public class Auction implements DatabaseEntity
             return false;
         }
         //else: Undo Last Bid
-        db.execUpdate("DELETE FROM `bids` WHERE `bidderid`=? && `auctionid`=? && `timestamp`=?"
+        db.execUpdate("DELETE FROM `bids` WHERE `bidderid`=? AND `auctionid`=? AND `timestamp`=?"
                       ,bidder.getId(), this.id, bid.getTimestamp());
         this.bids.pop();
         de.cubeisland.AuctionHouse.RedisSync.getInstance().publishAuctionUpsert(this.id);

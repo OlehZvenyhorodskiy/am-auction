@@ -97,12 +97,15 @@ public class AuctionHouse extends JavaPlugin
 
         try
         {
-            if (!"mysql".equalsIgnoreCase(config.auction_database_type))
+            String dbType = config.auction_database_type == null ? "mysql" : config.auction_database_type.trim().toLowerCase(java.util.Locale.ROOT);
+            if (!"mysql".equals(dbType) && !"sqlite".equals(dbType))
             {
-                throw new IllegalStateException("Unsupported database type in config: " + config.auction_database_type + ". This build currently supports mysql only.");
+                throw new IllegalStateException("Unsupported database type in config: " + config.auction_database_type + ". Supported types are: mysql, sqlite.");
             }
 
-            database = new Database(config.auction_database_host,
+            database = new Database(dbType,
+                                    this.getDataFolder(),
+                                    config.auction_database_host,
                                     config.auction_database_port,
                                     config.auction_database_user,
                                     config.auction_database_pass,

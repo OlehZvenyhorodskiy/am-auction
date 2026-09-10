@@ -50,7 +50,7 @@ public class Bid implements DatabaseEntity
                 amount,
                 new Timestamp(System.currentTimeMillis())
             );
-            ResultSet set = db.query("SELECT * FROM `bids` WHERE `timestamp`=? && `bidderid`=? LIMIT 1",timestamp,bidder.getId());
+            ResultSet set = db.query("SELECT * FROM `bids` WHERE `timestamp`=? AND `bidderid`=? LIMIT 1",timestamp,bidder.getId());
             try
             {
                 if (set.next())

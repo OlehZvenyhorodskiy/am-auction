@@ -30,6 +30,8 @@ public class Database
     /** After a failed connect attempt, fail fast for a while instead of stalling callers with connect timeouts. */
     private static final long CONNECT_BREAKER_MS = 15000L;
 
+    private final String type;
+    private final java.io.File dataFolder;
     private final String host;
     private final int port;
     private final String user;
@@ -64,12 +66,12 @@ public class Database
 
     public Database(String user, String pass, String name)
     {
-        this("localhost", 3306, user, pass, name, null, true, "", 10000, 30000, true, new ArrayList<String>());
+        this("mysql", null, "localhost", 3306, user, pass, name, null, true, "", 10000, 30000, true, new ArrayList<String>());
     }
 
     public Database(String host, short port, String user, String pass, String name)
     {
-        this(host, (int) port, user, pass, name, null, true, "", 10000, 30000, true, new ArrayList<String>());
+        this("mysql", null, host, (int) port, user, pass, name, null, true, "", 10000, 30000, true, new ArrayList<String>());
     }
 
     public Database(String host, int port, String user, String pass, String name,
@@ -77,7 +79,18 @@ public class Database
                     int connectTimeoutMs, int socketTimeoutMs,
                     boolean allowAutoPrefixedNames, List<String> databaseNameCandidates)
     {
-        loadDriver();
+        this("mysql", null, host, port, user, pass, name, jdbcUrl, autoCreateDatabase, extraParameters, connectTimeoutMs, socketTimeoutMs, allowAutoPrefixedNames, databaseNameCandidates);
+    }
+
+    public Database(String type, java.io.File dataFolder,
+                    String host, int port, String user, String pass, String name,
+                    String jdbcUrl, boolean autoCreateDatabase, String extraParameters,
+                    int connectTimeoutMs, int socketTimeoutMs,
+                    boolean allowAutoPrefixedNames, List<String> databaseNameCandidates)
+    {
+        this.type = (type == null || type.trim().isEmpty()) ? "mysql" : type.trim().toLowerCase(Locale.ROOT);
+        this.dataFolder = dataFolder;
+        loadDriver(this.type);
         this.host = safeTrim(host, "localhost");
         this.port = port <= 0 ? 3306 : port;
         this.user = safeTrim(user, "");
@@ -96,8 +109,26 @@ public class Database
         setupStructure();
     }
 
-    private static void loadDriver()
+    public boolean isSqlite()
     {
+        return "sqlite".equalsIgnoreCase(this.type);
+    }
+
+    private static void loadDriver(String type)
+    {
+        if ("sqlite".equalsIgnoreCase(type))
+        {
+            try
+            {
+                Class.forName("org.sqlite.JDBC");
+            }
+            catch (Throwable t)
+            {
+                throw new IllegalStateException("Couldn't find the SQLite driver! Ensure org.sqlite.JDBC is available in the server runtime.", t);
+            }
+            return;
+        }
+
         try
         {
             try
@@ -224,6 +255,35 @@ public class Database
      */
     private Connection openConnection()
     {
+        if (isSqlite())
+        {
+            if (this.dataFolder != null && !this.dataFolder.exists())
+            {
+                this.dataFolder.mkdirs();
+            }
+            java.io.File dbFile = this.dataFolder != null
+                ? new java.io.File(this.dataFolder, this.configuredName + ".db")
+                : new java.io.File(this.configuredName + ".db");
+            String sqliteUrl = "jdbc:sqlite:" + dbFile.getAbsolutePath();
+            try
+            {
+                Connection conn = DriverManager.getConnection(sqliteUrl);
+                conn.setAutoCommit(true);
+                try (Statement s = conn.createStatement())
+                {
+                    s.execute("PRAGMA foreign_keys = ON;");
+                    s.execute("PRAGMA journal_mode = WAL;");
+                    s.execute("PRAGMA synchronous = NORMAL;");
+                }
+                this.activeName = this.configuredName;
+                return conn;
+            }
+            catch (SQLException e)
+            {
+                throw new IllegalStateException("Failed to connect to SQLite database at " + sqliteUrl, e);
+            }
+        }
+
         SQLException firstFailure = null;
         List<String> attemptedUrls = new ArrayList<String>();
 
@@ -463,10 +523,23 @@ public class Database
         // but never the Statement. closeOnCompletion() makes the driver close the
         // Statement as soon as its ResultSet is closed, so statements can no longer pile
         // up on the connection (the pile-up was what froze Connection#close for 40+ seconds).
-        statement.closeOnCompletion();
+        try
+        {
+            statement.closeOnCompletion();
+        }
+        catch (Throwable ignored)
+        {
+        }
         for (int i = 0; i < params.length; ++i)
         {
-            statement.setObject(i + 1, params[i]);
+            if (params[i] instanceof Timestamp)
+            {
+                statement.setTimestamp(i + 1, (Timestamp) params[i]);
+            }
+            else
+            {
+                statement.setObject(i + 1, params[i]);
+            }
         }
         return statement;
     }
@@ -498,6 +571,71 @@ public class Database
 
     private void setupStructure()
     {
+        if (isSqlite())
+        {
+            this.exec("CREATE TABLE IF NOT EXISTS `bidder` ("
+                + "`id` INTEGER PRIMARY KEY AUTOINCREMENT,"
+                + "`name` TEXT NOT NULL UNIQUE,"
+                + "`type` INTEGER NOT NULL,"
+                + "`notify` INTEGER NOT NULL"
+                + ");");
+
+            this.exec("CREATE TABLE IF NOT EXISTS `auctions` ("
+                + "`id` INTEGER PRIMARY KEY,"
+                + "`ownerid` INTEGER NOT NULL,"
+                + "`item` TEXT NOT NULL,"
+                + "`amount` INTEGER NOT NULL,"
+                + "`timestamp` TIMESTAMP NOT NULL,"
+                + "FOREIGN KEY (`ownerid`) REFERENCES `bidder` (`id`) ON DELETE CASCADE"
+                + ");");
+
+            this.exec("CREATE TABLE IF NOT EXISTS `bids` ("
+                + "`id` INTEGER PRIMARY KEY AUTOINCREMENT,"
+                + "`auctionid` INTEGER NOT NULL,"
+                + "`bidderid` INTEGER NOT NULL,"
+                + "`amount` REAL NOT NULL,"
+                + "`timestamp` TIMESTAMP NOT NULL,"
+                + "FOREIGN KEY (`auctionid`) REFERENCES `auctions` (`id`) ON DELETE CASCADE,"
+                + "FOREIGN KEY (`bidderid`) REFERENCES `bidder` (`id`) ON DELETE CASCADE"
+                + ");");
+
+            this.exec("CREATE TABLE IF NOT EXISTS `auctionbox` ("
+                + "`id` INTEGER PRIMARY KEY AUTOINCREMENT,"
+                + "`bidderid` INTEGER NOT NULL,"
+                + "`item` TEXT NOT NULL,"
+                + "`amount` INTEGER NOT NULL,"
+                + "`price` REAL NOT NULL,"
+                + "`timestamp` TIMESTAMP NOT NULL,"
+                + "`ownerid` INTEGER NOT NULL,"
+                + "FOREIGN KEY (`bidderid`) REFERENCES `bidder` (`id`) ON DELETE CASCADE"
+                + ");");
+
+            this.exec("CREATE TABLE IF NOT EXISTS `subscription` ("
+                + "`id` INTEGER PRIMARY KEY AUTOINCREMENT,"
+                + "`bidderid` INTEGER NOT NULL,"
+                + "`auctionid` INTEGER DEFAULT NULL,"
+                + "`type` INTEGER NOT NULL,"
+                + "`item` TEXT DEFAULT NULL,"
+                + "FOREIGN KEY (`bidderid`) REFERENCES `bidder` (`id`) ON DELETE CASCADE,"
+                + "FOREIGN KEY (`auctionid`) REFERENCES `auctions` (`id`) ON DELETE CASCADE"
+                + ");");
+
+            this.exec("CREATE TABLE IF NOT EXISTS `price` ("
+                + "`id` INTEGER PRIMARY KEY AUTOINCREMENT,"
+                + "`item` TEXT DEFAULT NULL,"
+                + "`price` REAL NOT NULL,"
+                + "`amount` INTEGER NOT NULL"
+                + ");");
+
+            this.exec("CREATE INDEX IF NOT EXISTS `idx_auctions_ownerid` ON `auctions` (`ownerid`);");
+            this.exec("CREATE INDEX IF NOT EXISTS `idx_bids_auctionid` ON `bids` (`auctionid`);");
+            this.exec("CREATE INDEX IF NOT EXISTS `idx_bids_bidderid` ON `bids` (`bidderid`);");
+            this.exec("CREATE INDEX IF NOT EXISTS `idx_auctionbox_bidderid` ON `auctionbox` (`bidderid`);");
+            this.exec("CREATE INDEX IF NOT EXISTS `idx_subscription_bidderid` ON `subscription` (`bidderid`);");
+            this.exec("CREATE INDEX IF NOT EXISTS `idx_subscription_auctionid` ON `subscription` (`auctionid`);");
+            return;
+        }
+
         this.exec("CREATE TABLE IF NOT EXISTS `bidder` ("
             + "`id` INT NOT NULL AUTO_INCREMENT,"
             + "`name` VARCHAR(64) NOT NULL,"
@@ -684,6 +822,10 @@ public class Database
 
     private Connection openSnapshotConnection()
     {
+        if (this.isSqlite())
+        {
+            return this.openConnection();
+        }
         if (this.jdbcUrl.isEmpty() && this.activeName != null)
         {
             String url = this.buildDatabaseUrl(this.activeName);
