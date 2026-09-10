@@ -1,0 +1,69 @@
+debug: false
+logging:
+  # pluginActivity: false hides routine AuctionHousAqua INFO messages in console. Errors are still printed.
+  pluginActivity: false
+  # debug: true enables detailed diagnostic messages. Keep false on production.
+  debug: false
+auction:
+  maxAuctions:
+    player: 5
+    overall: 150
+    opIgnore: false
+  undoTime: 20s
+  removeTime: 1m
+  maxLength: 7d
+  standardLength: 30d
+  opCanCheat: true
+  timeFormat: 'dd/MM/yy HH:mm'
+  punish: 20
+  itemBoxLength: 2
+  comission: 3
+  language: ru
+  confirmID: false
+  notifyTime: [30m,5m,2m,1m]
+  # Use modern material names here on 1.21.8. Legacy numeric ids are ignored by the parser.
+  blacklist: [BEDROCK, END_PORTAL_FRAME, BARRIER, COMMAND_BLOCK, CHAIN_COMMAND_BLOCK, REPEATING_COMMAND_BLOCK, STRUCTURE_BLOCK, JIGSAW, LIGHT]
+  database:
+    type: mysql
+    host: localhost
+    port: 3306
+    user: auctionhouse
+    pass: 'change-me'
+    name: auctionhouse
+    # Optional full JDBC override. Leave empty to use host/port/user/pass/name above.
+    # Example:
+    # jdbcUrl: 'jdbc:mysql://127.0.0.1:3306/auctionhouse?useSSL=false'
+    jdbcUrl: ''
+    # Extra JDBC parameters appended automatically to the generated URL.
+    # Useful on shared hosting for settings like sslMode=REQUIRED or allowMultiQueries=true
+    connectionParameters: ''
+    # Optional extra schema names to try before giving up.
+    # Useful on shared hosting where the real DB is prefixed, for example bd52856_auctionhouse.
+    nameCandidates: []
+    # When true, the plugin also auto-tries <accountPrefix>_<name>, derived from the DB user before the first underscore.
+    allowAutoPrefixedNames: true
+    autoCreateDatabase: true
+    connectTimeoutMs: 10000
+    socketTimeoutMs: 30000
+    # MySQL polling fallback. Keep 0 when Redis is enabled; Redis events will sync servers instantly without full DB reloads.
+    # Use 30-120 only as a backup if Redis is disabled/unavailable.
+    syncIntervalSeconds: 0
+
+redis:
+  enabled: true
+  channel:
+    prefix: "auctionhouse:"
+    main: "auctionhouse:messaging"
+    inventory: "auctionhouse:inventories"
+    transaction: "auctionhouse:transactions"
+  host: "45.93.200.125"
+  port: 6379
+  password: "iINi$OCMEY"
+  database: 0
+  # Regular command timeout. Subscriber uses an infinite read timeout, so idle Redis does not reconnect every few seconds.
+  timeoutMs: 2000
+  lockTtlMs: 15000
+  poolConfig:
+    maxTotal: 128
+    maxIdle: 128
+    minIdle: 16

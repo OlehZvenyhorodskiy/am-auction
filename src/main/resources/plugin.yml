@@ -1,0 +1,322 @@
+name: AuctionHousAqua
+version: "1.21.8-1.4.6-inventoryviewfix154"
+main: de.cubeisland.AuctionHouse.AuctionHouse
+api-version: '1.21'
+commands:
+  auctionhouse:
+    description: "Основная команда AuctionHousAqua"
+    usage: "/<command> [menu|sell|sellinventory|search|items|claim|buying|expire|categories|redis|clearall|reload]"
+    aliases:
+      - ah
+      - aquaah
+      - zauctionhouse
+      - zauction
+      - zah
+      - hdv
+depend:
+  - Vault
+database: false
+website: "offline-local-build"
+description: "Аукционный дом с GUI-меню, русской локализацией и офлайн Maven-сборкой для 1.21.8."
+authors:
+  - "SlepniR"
+
+permissions:
+  auctionhouse.*:
+    description: "Полный доступ ко всем функциям AuctionHousAqua"
+    default: op
+    children:
+      auctionhouse.use: true
+      auctionhouse.command.*: true
+      auctionhouse.sign.*: true
+      auctionhouse.admin.reload: true
+      auctionhouse.admin.redis: true
+      auctionhouse.admin.clear: true
+      auctionhouse.slots.*: true
+      auctionhouse.slots.unlimited: true
+      auctionhouse.command.add.nolimit: true
+      auctionhouse.command.add.nolomit: true
+
+  auctionhouse.command.*:
+    description: "Все команды плагина"
+    children:
+      auctionhouse.command.add: true
+      auctionhouse.command.add.multi: true
+      auctionhouse.command.bid: true
+      auctionhouse.command.delete.id: true
+      auctionhouse.command.search: true
+      auctionhouse.command.getitems: true
+      auctionhouse.command.info: true
+      auctionhouse.command.notify: true
+      auctionhouse.command.sub: true
+      auctionhouse.command.undobid: true
+
+  auctionhouse.use:
+    description: "Открывать меню аукциона и пользоваться базовыми функциями"
+    default: true
+
+  auctionhouse.command.add:
+    description: "Создавать лоты и продавать предметы"
+    default: true
+
+  auctionhouse.command.add.multi:
+    description: "Выставлять несколько одинаковых лотов одной командой"
+    default: op
+
+  auctionhouse.command.add.nolimit:
+    description: "Обход лимита количества активных лотов"
+    default: op
+
+  auctionhouse.command.add.nolomit:
+    description: "Старый alias обхода лимита с опечаткой"
+    default: op
+
+  auctionhouse.command.bid:
+    description: "Делать ставки на лоты"
+    default: true
+
+  auctionhouse.command.search:
+    description: "Искать лоты"
+    default: true
+
+  auctionhouse.command.getitems:
+    description: "Получать предметы из хранилища"
+    default: true
+
+  auctionhouse.command.delete.id:
+    description: "Снимать свои лоты с продажи"
+    default: true
+
+  auctionhouse.command.info:
+    description: "Просматривать информацию о лотах"
+    default: true
+
+  auctionhouse.command.notify:
+    description: "Управлять уведомлениями"
+    default: true
+
+  auctionhouse.command.sub:
+    description: "Подписываться на предметы"
+    default: true
+
+  auctionhouse.command.undobid:
+    description: "Отменять последнюю ставку"
+    default: true
+
+  auctionhouse.command.bid.infinite:
+    description: "Делать ставки без проверки баланса"
+    default: op
+
+  auctionhouse.command.add.cheatitems:
+    description: "Выставлять запрещённые/чит-предметы"
+    default: op
+
+  auctionhouse.admin.reload:
+    description: "Перезагружать конфиг"
+    default: op
+
+  auctionhouse.admin.redis:
+    description: "Проверять статус Redis-синхронизации"
+    default: op
+
+  auctionhouse.admin.clear:
+    description: "Полностью очищать аукцион MySQL/Redis"
+    default: op
+
+  auctionhouse.sign.*:
+    description: "Использование и создание табличек AuctionHousAqua"
+    default: op
+    children:
+      auctionhouse.sign.auctionbox: true
+      auctionhouse.sign.start: true
+      auctionhouse.sign.list: true
+      auctionhouse.sign.create.box: true
+      auctionhouse.sign.create.add: true
+      auctionhouse.sign.create.list: true
+
+  auctionhouse.sign.auctionbox:
+    description: "Использовать табличку ящика аукциона"
+    default: true
+
+  auctionhouse.sign.start:
+    description: "Использовать табличку продажи"
+    default: true
+
+  auctionhouse.sign.list:
+    description: "Использовать табличку списка лотов"
+    default: true
+
+  auctionhouse.sign.create.box:
+    description: "Создавать табличку ящика аукциона"
+    default: op
+
+  auctionhouse.sign.create.add:
+    description: "Создавать табличку продажи"
+    default: op
+
+  auctionhouse.sign.create.list:
+    description: "Создавать табличку списка лотов"
+    default: op
+
+  auctionhouse.slots.*:
+    description: "Все уровни лимита слотов на аукционе"
+    default: false
+    children:
+      auctionhouse.slots.5: true
+      auctionhouse.slots.7: true
+      auctionhouse.slots.9: true
+      auctionhouse.slots.11: true
+      auctionhouse.slots.13: true
+      auctionhouse.slots.15: true
+      auctionhouse.slots.20: true
+
+  auctionhouse.slots.5:
+    description: "Разрешить до 5 активных лотов"
+    default: false
+
+  auctionhouse.slots.7:
+    description: "Разрешить до 7 активных лотов"
+    default: false
+
+  auctionhouse.slots.9:
+    description: "Разрешить до 9 активных лотов"
+    default: false
+
+  auctionhouse.slots.11:
+    description: "Разрешить до 11 активных лотов"
+    default: false
+
+  auctionhouse.slots.13:
+    description: "Разрешить до 13 активных лотов"
+    default: false
+
+  auctionhouse.slots.15:
+    description: "Разрешить до 15 активных лотов"
+    default: false
+
+  auctionhouse.slots.20:
+    description: "Разрешить до 20 активных лотов"
+    default: false
+
+  auctionhouse.slots.unlimited:
+    description: "Безлимит активных лотов"
+    default: op
+
+  zauctionhouse.use:
+    description: "Базовое использование аукциона в стиле zAuctionHouse"
+    default: true
+    children:
+      auctionhouse.use: true
+
+  zauctionhouse.sell:
+    description: "Команда /ah sell"
+    default: true
+    children:
+      auctionhouse.command.add: true
+
+  zauctionhouse.sell.inventory:
+    description: "Команда /ah sellinventory"
+    default: true
+    children:
+      auctionhouse.command.add: true
+
+  zauctionhouse.search:
+    description: "Команда /ah search"
+    default: true
+    children:
+      auctionhouse.command.search: true
+
+  zauctionhouse.claim:
+    description: "Команда /ah claim"
+    default: true
+    children:
+      auctionhouse.command.getitems: true
+
+  zauctionhouse.reload:
+    description: "Команда /ah reload"
+    default: op
+    children:
+      auctionhouse.admin.reload: true
+      auctionhouse.admin.redis: true
+
+  zauctionhouse.slots.*:
+    description: "Все уровни лимита слотов в стиле zAuctionHouse"
+    default: false
+    children:
+      zauctionhouse.slots.5: true
+      zauctionhouse.slots.7: true
+      zauctionhouse.slots.9: true
+      zauctionhouse.slots.11: true
+      zauctionhouse.slots.13: true
+      zauctionhouse.slots.15: true
+      zauctionhouse.slots.20: true
+
+  zauctionhouse.slots.5:
+    description: "Разрешить до 5 активных лотов"
+    default: false
+    children:
+      auctionhouse.slots.5: true
+
+  zauctionhouse.slots.7:
+    description: "Разрешить до 7 активных лотов"
+    default: false
+    children:
+      auctionhouse.slots.7: true
+
+  zauctionhouse.slots.9:
+    description: "Разрешить до 9 активных лотов"
+    default: false
+    children:
+      auctionhouse.slots.9: true
+
+  zauctionhouse.slots.11:
+    description: "Разрешить до 11 активных лотов"
+    default: false
+    children:
+      auctionhouse.slots.11: true
+
+  zauctionhouse.slots.13:
+    description: "Разрешить до 13 активных лотов"
+    default: false
+    children:
+      auctionhouse.slots.13: true
+
+  zauctionhouse.slots.15:
+    description: "Разрешить до 15 активных лотов"
+    default: false
+    children:
+      auctionhouse.slots.15: true
+
+  zauctionhouse.slots.20:
+    description: "Разрешить до 20 активных лотов"
+    default: false
+    children:
+      auctionhouse.slots.20: true
+
+  zauctionhouse.slots.unlimited:
+    description: "Безлимит активных лотов в стиле zAuctionHouse"
+    default: op
+    children:
+      auctionhouse.slots.unlimited: true
+
+  zauctionhouse.admin:
+    description: "Административный доступ в стиле zAuctionHouse без рекурсивного auctionhouse.*"
+    default: op
+    children:
+      auctionhouse.use: true
+      auctionhouse.command.*: true
+      auctionhouse.sign.*: true
+      auctionhouse.admin.reload: true
+      auctionhouse.admin.redis: true
+      auctionhouse.slots.*: true
+      auctionhouse.slots.unlimited: true
+      auctionhouse.command.add.nolimit: true
+      auctionhouse.command.add.nolomit: true
+      zauctionhouse.use: true
+      zauctionhouse.sell: true
+      zauctionhouse.sell.inventory: true
+      zauctionhouse.search: true
+      zauctionhouse.claim: true
+      zauctionhouse.reload: true
+      zauctionhouse.slots.*: true
+      zauctionhouse.slots.unlimited: true

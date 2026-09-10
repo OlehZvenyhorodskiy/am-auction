@@ -1,0 +1,27 @@
+auction:
+  title: '&8Аукцион &8(%page%/%maxPage%)'
+  size: 54
+search:
+  title: '&8Поиск: &f%query% &8(%page%/%maxPage%)'
+category:
+  title: '&8Категория: &f%category% &8(%page%/%maxPage%)'
+items:
+  title: '&8Мои лоты &8(%page%/%maxPage%)'
+claim:
+  title: '&8Хранилище &8(%page%/%maxPage%)'
+buying:
+  title: '&8Купленные предметы &8(%page%/%maxPage%)'
+expire:
+  title: '&8Непроданные предметы &8(%page%/%maxPage%)'
+categories:
+  title: '&8Категории'
+  size: 54
+show:
+  title: '&8Лот'
+  size: 27
+buyconfirm:
+  title: '&8Подтверждение покупки'
+  size: 27
+sell:
+  title: '&8Продажа инвентаря'
+  size: 54
